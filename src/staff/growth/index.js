@@ -67,6 +67,11 @@ const DEFAULTS = {
   MEMORY_HARD: 2000,
   NORMAL_INTERVAL_MS: 12 * 60 * 60 * 1000,  // 12h
   SOFT_MIN_GAP_MS: 6 * 60 * 60 * 1000,      // 6h
+  // Minimum gap between dreams dispatched by a HARD breach. Shorter than the
+  // soft gap because a HARD breach is genuinely more urgent, but NOT zero:
+  // before this existed the HARD branch fired on every tick, and a store
+  // parked above the threshold dreamed 96 times a day to no effect.
+  HARD_MIN_GAP_MS: 60 * 60 * 1000,          // 1h
   DREAM_TIMEOUT_MS: 12 * 60 * 1000,         // 12 min — slightly more than
                                             // the watcher's trigger-dream
                                             // budget so we can detect a
@@ -146,6 +151,70 @@ function evaluateTick({ cfg, sample, lastDream, inFlight, bloatedAlerted, now = 
   };
 }
 
+/**
+ * Below this, a change in HRM size is noise rather than a result. A lite dream
+ * on a settled field reports deltas in the 1e-3 MB range purely from
+ * re-serialisation.
+ */
+const EFFECT_EPSILON_MB = 0.05;
+
+/**
+ * Did the last dream actually move either number it is dispatched to reduce?
+ *
+ * `ok: true` means the binary exited cleanly, NOT that anything improved. A
+ * lite dream cannot prune, strengthen or connect, so on a store that is over a
+ * HARD threshold it completes successfully and changes nothing — and the
+ * condition that dispatched it is still true on the next tick.
+ *
+ * Returns false when before/after are missing: an unknown is not evidence of
+ * ineffectiveness, and this must never be the reason a real remedy is skipped.
+ */
+function dreamMovedNothing(lastDream) {
+  if (!lastDream || !lastDream.ok) return false;
+  const b = lastDream.before;
+  const a = lastDream.after;
+  if (!b || !a) return false;
+  const sizeFell =
+    a.sizeMB != null && b.sizeMB != null && a.sizeMB < b.sizeMB - EFFECT_EPSILON_MB;
+  const countFell =
+    a.memoryCount != null && b.memoryCount != null && a.memoryCount < b.memoryCount;
+  return !sizeFell && !countFell;
+}
+
+/**
+ * Should a HARD-threshold breach be held off this tick? `null` = go ahead.
+ *
+ * Two gates, in order:
+ *   1. Cadence. Even a genuine emergency does not want a dream every 15 min —
+ *      back-to-back passes on an unchanged store re-melt the same structure.
+ *   2. Effectiveness. If the previous dream ran clean and moved neither number,
+ *      repeating the SAME mode cannot clear the threshold. Escalate once to
+ *      deep — the only mode that can strengthen and connect — and if deep also
+ *      moved nothing, stop and say so, because the remedy is not the problem.
+ */
+function hardBranchBlock({ cfg, lastDream, sinceLast, over }) {
+  if (sinceLast < cfg.hardMinGapMs) {
+    return {
+      action: "skip",
+      reason: `${over}, but last dream ${Math.round(sinceLast / 60000)}m ago — hard-branch gap ${Math.round(cfg.hardMinGapMs / 60000)}m`,
+    };
+  }
+  if (dreamMovedNothing(lastDream)) {
+    if (lastDream.mode !== "deep") {
+      return {
+        action: "dream",
+        mode: "deep",
+        reason: `${over}; last ${lastDream.mode} dream moved nothing — escalating to deep`,
+      };
+    }
+    return {
+      action: "skip",
+      reason: `${over}; last deep dream moved nothing — dreaming cannot clear this, needs an operator`,
+    };
+  }
+  return null;
+}
+
 /** Cadence decision: { action: "dream"|"wait"|"skip", mode?, reason }. */
 function decideDream({ cfg, sample, lastDream, inFlight, now = Date.now() }) {
   const inFlightWait = inFlight
@@ -173,11 +242,25 @@ function decideDream({ cfg, sample, lastDream, inFlight, now = Date.now() }) {
   const lastTs = lastDream && lastDream.ok ? lastDream.ts : 0;
   const sinceLast = now - lastTs;
 
-  if (sample.sizeMB >= cfg.hrmHardMB) {
-    return { action: "dream", mode: cfg.defaultMode, reason: `HRM ${sample.sizeMB.toFixed(1)} MB ≥ HARD ${cfg.hrmHardMB} MB` };
-  }
-  if (sample.memoryCount != null && sample.memoryCount >= cfg.memoryHard) {
-    return { action: "dream", mode: cfg.defaultMode, reason: `${sample.memoryCount} memories ≥ HARD ${cfg.memoryHard}` };
+  // The HARD branches were the only two with no cadence gate at all — SOFT
+  // checks softMinGapMs, normal checks normalIntervalMs, HARD checked nothing.
+  // A host whose HRM sits permanently above HARD therefore dreamed on EVERY
+  // tick, forever. That is the same defect shape as #64 above (a failed dream
+  // relaunching every tick), in the other direction: here the dream *succeeds*
+  // and still never clears the condition that triggered it.
+  //
+  // Measured on the witness 2026-08-22..25: HARD=50 MB against a 98 MB store,
+  // 289 lite dreams in 3 days, 7.7 hours of compute, and the memory count it
+  // was trying to reduce rose 553 → 1280 while Xi fell 32%.
+  const overHardSize = sample.sizeMB >= cfg.hrmHardMB;
+  const overHardCount = sample.memoryCount != null && sample.memoryCount >= cfg.memoryHard;
+  if (overHardSize || overHardCount) {
+    const over = overHardSize
+      ? `HRM ${sample.sizeMB.toFixed(1)} MB ≥ HARD ${cfg.hrmHardMB} MB`
+      : `${sample.memoryCount} memories ≥ HARD ${cfg.memoryHard}`;
+    const blocked = hardBranchBlock({ cfg, lastDream, sinceLast, over });
+    if (blocked) return blocked;
+    return { action: "dream", mode: cfg.defaultMode, reason: over };
   }
   if (sample.sizeMB >= cfg.hrmSoftMB && sinceLast >= cfg.softMinGapMs) {
     return { action: "dream", mode: cfg.defaultMode, reason: `HRM ${sample.sizeMB.toFixed(1)} MB ≥ SOFT ${cfg.hrmSoftMB} MB + ${Math.round(sinceLast / 3600000)}h since last` };
@@ -216,6 +299,7 @@ function bootGrowth(deps) {
     memoryHard: parseInt(process.env.GROWTH_MEMORY_HARD || "", 10) || DEFAULTS.MEMORY_HARD,
     normalIntervalMs: readEnvMs("GROWTH_NORMAL_INTERVAL_MS", DEFAULTS.NORMAL_INTERVAL_MS),
     softMinGapMs: readEnvMs("GROWTH_SOFT_MIN_GAP_MS", DEFAULTS.SOFT_MIN_GAP_MS),
+    hardMinGapMs: readEnvMs("GROWTH_HARD_MIN_GAP_MS", DEFAULTS.HARD_MIN_GAP_MS),
     dreamTimeoutMs: readEnvMs("GROWTH_DREAM_TIMEOUT_MS", DEFAULTS.DREAM_TIMEOUT_MS),
     failBackoffMs: readEnvMs("GROWTH_FAIL_BACKOFF_MS", DEFAULTS.FAIL_BACKOFF_MS),
     defaultMode: readEnvStr("GROWTH_DEFAULT_MODE", "lite"),

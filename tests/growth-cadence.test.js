@@ -240,3 +240,101 @@ test("#16: KANNAKA_STATUS_CACHE overrides for split layouts", () => {
     if (prev === undefined) delete process.env.KANNAKA_STATUS_CACHE; else process.env.KANNAKA_STATUS_CACHE = prev;
   }
 });
+
+// ── the HARD branch had no cadence gate, and no notion of effect ──
+//
+// Found 2026-08-25 on the witness. GROWTH_HRM_HARD_MB=50 against a 98 MB store
+// made the HARD branch permanently true, and it was the ONLY branch with no
+// cadence gate — SOFT checks softMinGapMs, normal checks normalIntervalMs,
+// HARD checked nothing. So it dispatched a dream on every 15-minute tick for
+// three days: 289 dreams, 7.7 hours of compute, and the memory count it was
+// dispatched to reduce went UP 553 → 1280 while Xi fell 32%.
+//
+// The remedy could never work: GROWTH_DEFAULT_MODE was "lite", and a lite
+// dream cannot prune, strengthen or connect. Every one reported
+// "lite ok in 167s · HRM 98.1→98.1 MB (Δ+0.0)" — a success that changed
+// nothing, dispatched again fifteen minutes later.
+
+const HARD_CFG = { ...CFG, hardMinGapMs: HOUR };
+const OVER_HARD = { sizeMB: 98.1, memoryCount: 1280 };
+
+// A dream that ran clean and moved neither number — the live shape.
+const NOOP_LITE = (ts) => ({
+  ts, ok: true, mode: "lite",
+  before: { sizeMB: 98.1, memoryCount: 1278 },
+  after: { sizeMB: 98.1, memoryCount: 1280 },
+});
+
+test("HARD breach respects a cadence gap instead of firing every tick", () => {
+  // 15 minutes after a dream — one tick. Before the fix this returned "dream".
+  const lastDream = { ts: NOW - 15 * 60_000, ok: true, mode: "lite",
+    before: { sizeMB: 99, memoryCount: 1280 }, after: { sizeMB: 98.1, memoryCount: 1270 } };
+  const d = decideDream({ cfg: HARD_CFG, sample: OVER_HARD, lastDream, inFlight: null, now: NOW });
+  assert.strictEqual(d.action, "skip");
+  assert.match(d.reason, /hard-branch gap 60m/);
+});
+
+test("HARD breach still fires once the gap has elapsed", () => {
+  const lastDream = { ts: NOW - 2 * HOUR, ok: true, mode: "lite",
+    before: { sizeMB: 99, memoryCount: 1280 }, after: { sizeMB: 98.1, memoryCount: 1270 } };
+  const d = decideDream({ cfg: HARD_CFG, sample: OVER_HARD, lastDream, inFlight: null, now: NOW });
+  assert.strictEqual(d.action, "dream");
+  assert.match(d.reason, /≥ HARD/);
+});
+
+test("a lite dream that moved nothing escalates to deep rather than repeating", () => {
+  const d = decideDream({
+    cfg: HARD_CFG, sample: OVER_HARD, lastDream: NOOP_LITE(NOW - 2 * HOUR),
+    inFlight: null, now: NOW,
+  });
+  assert.strictEqual(d.action, "dream");
+  assert.strictEqual(d.mode, "deep", "repeating lite cannot clear a HARD threshold");
+  assert.match(d.reason, /moved nothing — escalating to deep/);
+});
+
+test("a deep dream that moved nothing stops, and says an operator is needed", () => {
+  // The end of the line: the strongest remedy ran and the numbers did not
+  // move. Continuing to dream is burning compute to no effect, which is the
+  // whole defect. Say so instead of looping.
+  const noopDeep = { ...NOOP_LITE(NOW - 2 * HOUR), mode: "deep" };
+  const d = decideDream({ cfg: HARD_CFG, sample: OVER_HARD, lastDream: noopDeep, inFlight: null, now: NOW });
+  assert.strictEqual(d.action, "skip");
+  assert.match(d.reason, /dreaming cannot clear this, needs an operator/);
+});
+
+test("an effective dream is not mistaken for an ineffective one", () => {
+  // Guard against the opposite failure: a dream that IS working must not be
+  // suppressed. Count fell — that is a result, even with size unchanged.
+  const worked = { ts: NOW - 2 * HOUR, ok: true, mode: "lite",
+    before: { sizeMB: 98.1, memoryCount: 1400 }, after: { sizeMB: 98.1, memoryCount: 1280 } };
+  const d = decideDream({ cfg: HARD_CFG, sample: OVER_HARD, lastDream: worked, inFlight: null, now: NOW });
+  assert.strictEqual(d.action, "dream");
+  assert.strictEqual(d.mode, "lite", "a working remedy is not escalated");
+});
+
+test("missing before/after is not treated as evidence of ineffectiveness", () => {
+  // An unknown must never be the reason a real remedy is skipped.
+  const noMetrics = { ts: NOW - 2 * HOUR, ok: true, mode: "lite" };
+  const d = decideDream({ cfg: HARD_CFG, sample: OVER_HARD, lastDream: noMetrics, inFlight: null, now: NOW });
+  assert.strictEqual(d.action, "dream");
+  assert.strictEqual(d.mode, "lite");
+});
+
+test("sub-noise size deltas do not count as movement", () => {
+  // Re-serialisation alone shifts the file by ~1e-3 MB. Counting that as
+  // progress would re-arm the loop this fix exists to break.
+  const noise = { ts: NOW - 2 * HOUR, ok: true, mode: "lite",
+    before: { sizeMB: 98.100, memoryCount: 1280 }, after: { sizeMB: 98.098, memoryCount: 1280 } };
+  const d = decideDream({ cfg: HARD_CFG, sample: OVER_HARD, lastDream: noise, inFlight: null, now: NOW });
+  assert.strictEqual(d.mode, "deep", "a 0.002 MB drift is noise, not a result");
+});
+
+test("the count-based HARD branch is gated too, not just the size one", () => {
+  const countOnly = { sizeMB: 10, memoryCount: 5000 };
+  const cfg = { ...HARD_CFG, hrmHardMB: 95, memoryHard: 2000 };
+  const lastDream = { ts: NOW - 15 * 60_000, ok: true, mode: "lite",
+    before: { sizeMB: 10, memoryCount: 5100 }, after: { sizeMB: 10, memoryCount: 5000 } };
+  const d = decideDream({ cfg, sample: countOnly, lastDream, inFlight: null, now: NOW });
+  assert.strictEqual(d.action, "skip");
+  assert.match(d.reason, /5000 memories ≥ HARD 2000.*hard-branch gap/);
+});
