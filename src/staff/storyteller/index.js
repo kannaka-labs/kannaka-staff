@@ -160,8 +160,11 @@ function bootStoryteller(deps) {
     };
   }
 
-  setTimeout(() => { tick().catch((err) => console.warn(`[storyteller] first tick: ${err.message}`)); }, 90_000);
-  setInterval(() => { tick().catch((err) => console.warn(`[storyteller] tick: ${err.message}`)); }, cfg.tickMs);
+  // unref'd so these timers never hold the event loop open on their own —
+  // in production the HTTP listener does that, and a bootStoryteller() call
+  // in a test must not keep the runner alive or reach a live radio fetch.
+  setTimeout(() => { tick().catch((err) => console.warn(`[storyteller] first tick: ${err.message}`)); }, 90_000).unref();
+  setInterval(() => { tick().catch((err) => console.warn(`[storyteller] tick: ${err.message}`)); }, cfg.tickMs).unref();
 
   return {
     getState() {
