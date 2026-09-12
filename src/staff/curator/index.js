@@ -331,8 +331,11 @@ function bootCurator(deps) {
 
   // First tick deferred ~45s so the watcher's baseline probes establish
   // first; staggered from Growth's 30s so we don't burst-hit the radio.
-  setTimeout(() => { tick().catch((e) => console.warn(`[curator] first tick: ${e.message}`)); }, 45_000);
-  setInterval(() => { tick().catch((e) => console.warn(`[curator] tick: ${e.message}`)); }, cfg.tickMs);
+  // unref'd so these timers never hold the event loop open on their own —
+  // in production the HTTP listener does that, and a bootCurator() call
+  // in a test must not keep the runner alive or reach a live radio fetch.
+  setTimeout(() => { tick().catch((e) => console.warn(`[curator] first tick: ${e.message}`)); }, 45_000).unref();
+  setInterval(() => { tick().catch((e) => console.warn(`[curator] tick: ${e.message}`)); }, cfg.tickMs).unref();
 
   return {
     getState() {

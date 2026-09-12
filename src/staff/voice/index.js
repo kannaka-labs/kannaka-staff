@@ -180,8 +180,11 @@ function bootVoice(deps) {
     persist();
   }
 
-  setTimeout(() => { tick().catch((e) => console.warn(`[voice] first tick: ${e.message}`)); }, 60_000);
-  setInterval(() => { tick().catch((e) => console.warn(`[voice] tick: ${e.message}`)); }, cfg.tickMs);
+  // unref'd so these timers never hold the event loop open on their own —
+  // in production the HTTP listener does that, and a bootVoice() call in
+  // a test must not keep the runner alive or reach a live radio fetch.
+  setTimeout(() => { tick().catch((e) => console.warn(`[voice] first tick: ${e.message}`)); }, 60_000).unref();
+  setInterval(() => { tick().catch((e) => console.warn(`[voice] tick: ${e.message}`)); }, cfg.tickMs).unref();
 
   return {
     getState() {
