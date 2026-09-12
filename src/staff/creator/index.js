@@ -41,7 +41,7 @@ function readEnvStr(name, fallback) {
   return v || fallback;
 }
 
-function postJson(target, body, timeoutMs) {
+function postJson(target, body, timeoutMs, extraHeaders = {}) {
   return new Promise((resolve) => {
     const u = url.parse(target);
     const lib = u.protocol === "https:" ? https : http;
@@ -51,7 +51,7 @@ function postJson(target, body, timeoutMs) {
       hostname: u.hostname,
       port: u.port || (u.protocol === "https:" ? 443 : 80),
       path: u.pathname + (u.search || ""),
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload), ...extraHeaders },
       timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
@@ -141,39 +141,12 @@ function bootCreator(deps) {
       if (!body.prompt || !body.building_id) {
         return { ok: false, status: 0, error: "image requires prompt + building_id" };
       }
-      return new Promise((resolve) => {
-        const u = url.parse(cfg.obcApi + "/artifacts/generate-image");
-        const lib = u.protocol === "https:" ? https : http;
-        const payload = JSON.stringify(body);
-        const req = lib.request({
-          method: "POST",
-          hostname: u.hostname,
-          // An http:// OBC_API with no explicit port was dialled on 443,
-          // which never connects. Match the protocol like every other
-          // request helper in this repo.
-          port: u.port || (u.protocol === "https:" ? 443 : 80),
-          path: u.pathname + (u.search || ""),
-          headers: {
-            "Content-Type": "application/json",
-            "Content-Length": Buffer.byteLength(payload),
-            "Authorization": `Bearer ${jwt}`,
-          },
-          timeout: cfg.timeoutMs,
-        }, (res) => {
-          const chunks = [];
-          res.on("data", (c) => chunks.push(c));
-          const settle = () => {
-            const text = Buffer.concat(chunks).toString("utf8").slice(0, 4000);
-            resolve({ ok: res.statusCode >= 200 && res.statusCode < 400, status: res.statusCode, body: text });
-          };
-          res.on("end", settle);
-          res.on("close", settle);
-        });
-        req.on("error", (e) => resolve({ ok: false, status: 0, error: e.message }));
-        req.on("timeout", () => req.destroy(new Error("timeout")));
-        req.write(payload);
-        req.end();
-      });
+      return postJson(
+        cfg.obcApi + "/artifacts/generate-image",
+        body,
+        cfg.timeoutMs,
+        { "Authorization": `Bearer ${jwt}` },
+      );
     }
     if (kind === "track") {
       return { ok: false, status: 0, error: "use Distributor for full album publishing (release-album.sh)" };
