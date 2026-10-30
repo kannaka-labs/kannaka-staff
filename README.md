@@ -41,7 +41,7 @@ When something silently fails — a service deactivating, the disk filling, a zo
 ## Run
 
 ```bash
-git clone https://github.com/NickFlach/kannaka-staff.git
+git clone https://github.com/kannaka-labs/kannaka-staff.git
 cd kannaka-staff
 npm install
 
@@ -85,8 +85,8 @@ surface can say "no", and says it when the "no" is knowable.
 
 | repo | role |
 |---|---|
-| [`kannaka-memory`](https://github.com/NickFlach/kannaka-memory) | the substrate being watched |
-| [`kannaka-radio`](https://github.com/NickFlach/kannaka-radio) | the main service this guards |
+| [`kannaka-memory`](https://github.com/kannaka-labs/kannaka-memory) | the substrate being watched |
+| [`kannaka-radio`](https://github.com/kannaka-labs/kannaka-radio) | the main service this guards |
 | [`kannaka-observatory`](https://github.com/NickFlach/kannaka-observatory) | where alerts surface visually |
 
 ---
